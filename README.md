@@ -282,7 +282,6 @@ debugging a match. These files are git-ignored.
 ```
 
 ## Write your own bot
-
 You don't need this client — any websocket client works. The contract is:
 
 1. Connect to `ws(s)://<server>/ws?token=<your bot token>`.
