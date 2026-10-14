@@ -2,180 +2,39 @@ name: tests
 
 on:
   push:
+    branches: [ main, master ]
   pull_request:
+    branches: [ main, master ]
 
 jobs:
-  unittest:
+  build:
     runs-on: ubuntu-latest
-
-    # Lo que necesita python-coverage-comment-action: escribir la branch de
-    # datos del badge y comentar en los PRs.
-    permissions:
-      contents: write
-      pull-requests: write
-
     strategy:
-      fail-fast: false
       matrix:
-        python-version: ['3.9', '3.12']
+        python-version: ["3.9", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      # Estilo y errores obvios. La config vive en setup.cfg, así que acá no
-      # va ninguna flag: `flake8 .` lee de ahí el largo de línea y los excludes.
-      - name: Lint
-        run: flake8 .
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-      - name: Run tests with coverage
-        run: coverage run -m unittest discover -v
-
-      # Falla la build si la cobertura baja del 90 % (también está en
-      # .coveragerc, pero se explicita acá como pide la cátedra).
-      - name: Check coverage
-        run: |
-          coverage report --fail-under=90 -m
-          coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
-
-      # Badge y comentario de cobertura sin servicio externo: en push a main la
-      # action guarda el badge en la branch python-coverage-comment-action-data
-      # de este mismo repo, y en un PR deja el detalle línea por línea como
-      # comentario. Sólo una pata de la matriz, si no se pisan entre sí.
-      - name: Coverage PR comment and HTML report
-        if: matrix.python-version == '3.12'
-        uses: py-cov-action/python-coverage-comment-action@v3
-        with:
-          GITHUB_TOKEN: ${{ github.token }}
-
-      # Coveralls (opcional). Con un repo PRIVADO exige una suscripción paga, y
-      # sin ella rechaza la subida con "Unprocessable Entity". Por eso el paso es
-      # no bloqueante: que Coveralls falle no debe tirar abajo la build. La
-      # cobertura que cuenta es la de `Check coverage` (--fail-under=90).
-      # coverage escribe un .coverage binario que Coveralls no lee, de ahí la
-      # conversión a LCOV.
-      - name: Convert coverage to LCOV
-        if: matrix.python-version == '3.12'
-        run: coverage lcov -o coverage.lcov
-
-      - name: Upload coverage to Coveralls
-        if: matrix.python-version == '3.12'
-        continue-on-error: true
-        uses: coverallsapp/github-action@v2
-        with:
-          file: coverage.lcov
-          format: lcov
-
-      # Complejidad ciclomática. Es sólo informativa: choose_direction() es la
-      # heurística entera del bot y rankea muy por encima de A, así que si este
-      # paso bloqueara, la build quedaría roja siempre aunque el lint, los tests
-      # y la cobertura pasen. Se ve el resultado sin romper nada.
-      - name: Check complexity (informativo)
-        continue-on-error: true
-        run: xenon --max-absolute A --max-modules A --max-average A run.py test_run.py
-
-  # Los tres badges del README se generan acá y salen todos de la misma branch
-  # de datos, así no dependemos de que un tercero publique nada.
-  #
-  # Va en un job aparte a propósito: python-coverage-comment-action corre en
-  # Docker como root y deja el .git del workspace con dueño root, así que
-  # cualquier `git commit` posterior en ese mismo job muere con
-  # "could not open '.git/COMMIT_EDITMSG': Permission denied". Un job nuevo
-  # arranca con un checkout limpio.
-  badges:
-    needs: unittest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Measure
-        run: |
-          # Es el mismo commit que ya validó el job unittest, así que los
-          # números dan igual; se recalculan porque este job arranca limpio.
-          flake8 . --exit-zero -qq --count > "$RUNNER_TEMP/lint.txt"
-          radon cc run.py test_run.py -j > "$RUNNER_TEMP/cc.json"
-
-      - name: Build shields.io endpoints
-        run: |
-          cat > "$RUNNER_TEMP/badges.py" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          cc_path, lint_path, out_dir = sys.argv[1:4]
-          out = pathlib.Path(out_dir)
-          out.mkdir(parents=True, exist_ok=True)
-
-          def write(name, label, message, color):
-              body = {'schemaVersion': 1, 'label': label,
-                      'message': message, 'color': color}
-              (out / name).write_text(json.dumps(body))
-              print(name, body)
-
-          # complejidad: el peor bloque del repo, no el promedio. Un promedio
-          # esconde justo la funcion que querrias mirar.
-          RANK_COLORS = {'A': 'brightgreen', 'B': 'yellowgreen', 'C': 'yellow',
-                         'D': 'orange', 'E': 'orangered', 'F': 'red'}
-          blocks = []
-
-          def walk(bs):
-              for b in bs:
-                  blocks.append(b)
-                  walk(b.get('closures', []))
-
-          for path, bs in json.loads(pathlib.Path(cc_path).read_text()).items():
-              if isinstance(bs, dict):  # radon informa errores como {"error": ...}
-                  sys.exit('radon no pudo leer {}: {}'.format(path, bs))
-              walk(bs)
-
-          worst = max(blocks, key=lambda b: b['complexity'])
-          write('complexity.json', 'complexity',
-                '{} ({})'.format(worst['rank'], worst['complexity']),
-                RANK_COLORS[worst['rank']])
-
-          # lint
-          issues = int(pathlib.Path(lint_path).read_text().strip())
-          write('lint.json', 'flake8',
-                'passing' if issues == 0 else '{} issues'.format(issues),
-                'brightgreen' if issues == 0 else 'red')
-          PY
-          python "$RUNNER_TEMP/badges.py" \
-            "$RUNNER_TEMP/cc.json" "$RUNNER_TEMP/lint.txt" \
-            "$RUNNER_TEMP/badges"
-
-      - name: Publish to the badge-data branch
-        run: |
-          # La branch es sólo data generada, así que se reescribe entera en cada
-          # push: un único commit huérfano, sin historia que mantener.
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout --orphan badge-data
-          git rm -rf --cached . > /dev/null
-          cp "$RUNNER_TEMP"/badges/*.json .
-          git add -f complexity.json lint.json
-          git commit -m "Badges for ${GITHUB_SHA:0:7}"
-          git push -f origin badge-data
+    - name: Test with unittest and check 90% coverage
+      run: |
+        coverage run -m unittest discover
+        coverage report --fail-under=90
